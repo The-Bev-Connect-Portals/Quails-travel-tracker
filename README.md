@@ -62,6 +62,49 @@ in the schema is what actually protects each person's data.
 > While testing with family, you can skip email confirmation:
 > **Authentication → Providers → Email → toggle off "Confirm email"**
 
+### 🔵 Google sign-in (optional, requires Cloud Mode)
+
+A "Continue with Google" button is built in. It stays greyed out until you
+finish the steps below, because OAuth needs a real backend.
+
+**Step 1 — Create Google OAuth credentials**
+
+1. Go to [console.cloud.google.com](https://console.cloud.google.com)
+2. Create a project (or pick an existing one)
+3. **APIs & Services → OAuth consent screen**
+   - User type: **External**
+   - Fill in app name, your email, and save
+   - Under *Test users*, add the emails that will sign in while you're testing
+4. **APIs & Services → Credentials → Create Credentials → OAuth client ID**
+   - Application type: **Web application**
+   - Under **Authorized redirect URIs**, add your Supabase callback:
+     ```
+     https://YOUR-PROJECT-REF.supabase.co/auth/v1/callback
+     ```
+     (Find this exact URL in Supabase under Authentication → Providers → Google)
+5. Copy the **Client ID** and **Client Secret**
+
+**Step 2 — Connect it to Supabase**
+
+1. In Supabase: **Authentication → Providers → Google**
+2. Toggle it **on**
+3. Paste in the Client ID and Client Secret
+4. Save
+
+**Step 3 — Allow your site to redirect back**
+
+In Supabase: **Authentication → URL Configuration**
+
+- **Site URL**: your Netlify URL, e.g. `https://quails-travel-tracker.netlify.app`
+- **Redirect URLs**: add the same URL
+
+That's it. The Google button lights up and new users get an account
+automatically on first sign-in, profile photo and all.
+
+> While the consent screen is in *Testing* mode, only the emails you added
+> as test users can sign in. Publish the consent screen when you're ready
+> to open it up.
+
 ### How saving works
 Changes save automatically about a second after you stop making them.
 A "Saving… / ✓ Saved" indicator appears in the header so you always know
@@ -109,6 +152,7 @@ python3 -m http.server 8000
 ## Roadmap
 
 - [x] User accounts (local + Supabase auth)
+- [x] Google sign-in
 - [x] Persist data between sessions
 - [ ] Kids / family profiles
 - [ ] Map pins on the Want to Go wishlist
