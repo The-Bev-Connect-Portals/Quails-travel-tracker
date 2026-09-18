@@ -8,6 +8,7 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.8.5/d3.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.39.0/dist/umd/supabase.min.js"></script>
 <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,700;1,400&display=swap" rel="stylesheet"/>
 <style>
 *{box-sizing:border-box;margin:0;padding:0;}
@@ -31,6 +32,267 @@ const C = {
   green:'#5a9a40',greenHi:'#8ab870',
   gold:'#c8a030',rust:'#c8601a',teal:'#3a9a8a',purple:'#8a60c0',blue:'#3a70b0',
 };
+// ═══════════════════════════════════════════════════════════════════════════
+//  CONFIG — paste your Supabase keys here to enable real cloud accounts.
+//  Leave blank to run in Local Mode (accounts saved on this device only).
+//  Get keys at: supabase.com → your project → Settings → API
+// ═══════════════════════════════════════════════════════════════════════════
+const SUPABASE_URL      = "";
+const SUPABASE_ANON_KEY = "";
+
+const CLOUD_MODE = Boolean(SUPABASE_URL && SUPABASE_ANON_KEY);
+let supabase = null;
+if (CLOUD_MODE && window.supabase) {
+  supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+}
+
+// ── DATA KEYS ────────────────────────────────────────────────────────────────
+const SET_KEYS  = ['states','parks','continents','wonders','natural','oceans','countries','capitals'];
+const LIST_KEYS = ['wCities','usCities','rests','bars','breweries','wineries','beers','wines',
+                   'stays','beaches','lakes','rivers','islands','hikes','museums','historic',
+                   'zoos','cparks','roadtrips','sports','amusement','festivals','wantItems'];
+
+function emptyData() {
+  const d = {};
+  SET_KEYS.forEach(k => d[k] = []);
+  LIST_KEYS.forEach(k => d[k] = []);
+  return d;
+}
+
+// ── LOCAL AUTH (no Supabase) ─────────────────────────────────────────────────
+const LocalAuth = {
+  usersKey: 'qtl_users',
+  sessionKey: 'qtl_session',
+
+  _hash(str) {
+    let h = 0;
+    for (let i = 0; i < str.length; i++) { h = ((h << 5) - h) + str.charCodeAt(i); h |= 0; }
+    return String(h);
+  },
+  _users() {
+    try { return JSON.parse(localStorage.getItem(this.usersKey) || '{}'); }
+    catch { return {}; }
+  },
+  _saveUsers(u) { localStorage.setItem(this.usersKey, JSON.stringify(u)); },
+
+  signUp(email, password, name) {
+    const users = this._users();
+    const key = email.toLowerCase().trim();
+    if (users[key]) return { error: 'An account with that email already exists. Try signing in.' };
+    if (password.length < 6) return { error: 'Password must be at least 6 characters.' };
+    users[key] = { email: key, name: name || key.split('@')[0], pw: this._hash(password), created: Date.now() };
+    this._saveUsers(users);
+    localStorage.setItem(this.sessionKey, key);
+    return { user: { email: key, name: users[key].name } };
+  },
+
+  signIn(email, password) {
+    const users = this._users();
+    const key = email.toLowerCase().trim();
+    const u = users[key];
+    if (!u) return { error: 'No account found with that email.' };
+    if (u.pw !== this._hash(password)) return { error: 'Incorrect password.' };
+    localStorage.setItem(this.sessionKey, key);
+    return { user: { email: key, name: u.name } };
+  },
+
+  session() {
+    const key = localStorage.getItem(this.sessionKey);
+    if (!key) return null;
+    const u = this._users()[key];
+    return u ? { email: u.email, name: u.name } : null;
+  },
+
+  signOut() { localStorage.removeItem(this.sessionKey); },
+
+  loadData(email) {
+    try { return JSON.parse(localStorage.getItem(`qtl_data_${email}`) || 'null') || emptyData(); }
+    catch { return emptyData(); }
+  },
+  saveData(email, data) {
+    try { localStorage.setItem(`qtl_data_${email}`, JSON.stringify(data)); return true; }
+    catch { return false; }
+  },
+};
+
+// ── UNIFIED AUTH API ─────────────────────────────────────────────────────────
+const Auth = {
+  async getSession() {
+    if (CLOUD_MODE && supabase) {
+      const { data } = await supabase.auth.getSession();
+      if (!data?.session?.user) return null;
+      const u = data.session.user;
+      return { email: u.email, name: u.user_metadata?.name || u.email.split('@')[0], id: u.id };
+    }
+    return LocalAuth.session();
+  },
+
+  async signUp(email, password, name) {
+    if (CLOUD_MODE && supabase) {
+      const { data, error } = await supabase.auth.signUp({
+        email, password, options: { data: { name } },
+      });
+      if (error) return { error: error.message };
+      if (!data.session) return { needsConfirm: true };
+      return { user: { email: data.user.email, name, id: data.user.id } };
+    }
+    return LocalAuth.signUp(email, password, name);
+  },
+
+  async signIn(email, password) {
+    if (CLOUD_MODE && supabase) {
+      const { data, error } = await supabase.auth.signInWithPassword({ email, password });
+      if (error) return { error: error.message };
+      const u = data.user;
+      return { user: { email: u.email, name: u.user_metadata?.name || u.email.split('@')[0], id: u.id } };
+    }
+    return LocalAuth.signIn(email, password);
+  },
+
+  async signOut() {
+    if (CLOUD_MODE && supabase) await supabase.auth.signOut();
+    else LocalAuth.signOut();
+  },
+
+  async loadData(user) {
+    if (CLOUD_MODE && supabase) {
+      const { data, error } = await supabase
+        .from('travel_data').select('data').eq('user_id', user.id).maybeSingle();
+      if (error || !data) return emptyData();
+      return { ...emptyData(), ...(data.data || {}) };
+    }
+    return LocalAuth.loadData(user.email);
+  },
+
+  async saveData(user, data) {
+    if (CLOUD_MODE && supabase) {
+      const { error } = await supabase
+        .from('travel_data')
+        .upsert({ user_id: user.id, data, updated_at: new Date().toISOString() },
+                { onConflict: 'user_id' });
+      return !error;
+    }
+    return LocalAuth.saveData(user.email, data);
+  },
+};
+
+// ── AUTH SCREEN ──────────────────────────────────────────────────────────────
+function AuthScreen({ onAuth }) {
+  const [mode, setMode]       = useState('signin');
+  const [email, setEmail]     = useState('');
+  const [pw, setPw]           = useState('');
+  const [name, setName]       = useState('');
+  const [err, setErr]         = useState('');
+  const [msg, setMsg]         = useState('');
+  const [busy, setBusy]       = useState(false);
+
+  const submit = async () => {
+    setErr(''); setMsg('');
+    if (!email.trim() || !pw) { setErr('Email and password are required.'); return; }
+    setBusy(true);
+    const res = mode === 'signup'
+      ? await Auth.signUp(email, pw, name)
+      : await Auth.signIn(email, pw);
+    setBusy(false);
+    if (res.error) { setErr(res.error); return; }
+    if (res.needsConfirm) { setMsg('Check your email to confirm your account, then sign in.'); setMode('signin'); return; }
+    onAuth(res.user);
+  };
+
+  const IS = {
+    width:'100%', padding:'11px 14px', borderRadius:9,
+    border:`1.5px solid ${C.border}`, background:C.surface2,
+    color:C.text, fontSize:'0.9rem', outline:'none', marginBottom:10,
+  };
+
+  return (
+    <div style={{
+      minHeight:'100vh', background:'linear-gradient(160deg,#0f1f0f 0%,#1c2b1c 50%,#16281a 100%)',
+      display:'flex', alignItems:'center', justifyContent:'center', padding:20,
+    }}>
+      <div style={{ width:'100%', maxWidth:400 }}>
+
+        {/* Logo */}
+        <div style={{ textAlign:'center', marginBottom:28 }}>
+          <div style={{ fontSize:'2.6rem', marginBottom:8 }}>🗺️</div>
+          <h1 style={{ fontFamily:"'Playfair Display',serif", fontSize:'1.8rem', color:C.text, marginBottom:4 }}>
+            Quail's Travel Log
+          </h1>
+          <div style={{ fontFamily:"'Playfair Display',serif", fontStyle:'italic', fontSize:'0.9rem', color:C.textMuted }}>
+            Guide to the Galaxy
+          </div>
+        </div>
+
+        {/* Card */}
+        <div style={{
+          background:C.surface, borderRadius:14, border:`1px solid ${C.border}`,
+          padding:26, boxShadow:'0 12px 40px rgba(0,0,0,0.4)',
+        }}>
+          {/* Tabs */}
+          <div style={{ display:'flex', gap:4, marginBottom:20, background:C.surface2, borderRadius:9, padding:4 }}>
+            {[{id:'signin',l:'Sign In'},{id:'signup',l:'Create Account'}].map(t => (
+              <button key={t.id} onClick={() => { setMode(t.id); setErr(''); setMsg(''); }} style={{
+                flex:1, padding:'9px', border:'none', borderRadius:7, cursor:'pointer',
+                background: mode===t.id ? C.green : 'transparent',
+                color: mode===t.id ? '#fff' : C.textMuted,
+                fontSize:'0.85rem', fontWeight: mode===t.id?600:400,
+                transition:'all 0.15s', fontFamily:'inherit',
+              }}>{t.l}</button>
+            ))}
+          </div>
+
+          {mode === 'signup' && (
+            <>
+              <label style={{fontSize:'0.7rem',color:C.textMuted,textTransform:'uppercase',letterSpacing:'0.07em',display:'block',marginBottom:5}}>Your Name</label>
+              <input value={name} onChange={e=>setName(e.target.value)} placeholder="Claire" style={IS}
+                onKeyDown={e=>e.key==='Enter'&&submit()}/>
+            </>
+          )}
+
+          <label style={{fontSize:'0.7rem',color:C.textMuted,textTransform:'uppercase',letterSpacing:'0.07em',display:'block',marginBottom:5}}>Email</label>
+          <input type="email" value={email} onChange={e=>setEmail(e.target.value)} placeholder="you@example.com" style={IS}
+            onKeyDown={e=>e.key==='Enter'&&submit()}/>
+
+          <label style={{fontSize:'0.7rem',color:C.textMuted,textTransform:'uppercase',letterSpacing:'0.07em',display:'block',marginBottom:5}}>Password</label>
+          <input type="password" value={pw} onChange={e=>setPw(e.target.value)} placeholder="At least 6 characters" style={IS}
+            onKeyDown={e=>e.key==='Enter'&&submit()}/>
+
+          {err && (
+            <div style={{background:'rgba(200,60,40,0.12)',border:'1px solid rgba(200,60,40,0.3)',color:'#e08070',borderRadius:8,padding:'9px 12px',fontSize:'0.82rem',marginBottom:12}}>
+              {err}
+            </div>
+          )}
+          {msg && (
+            <div style={{background:'rgba(90,154,64,0.12)',border:`1px solid ${C.green}`,color:C.greenHi,borderRadius:8,padding:'9px 12px',fontSize:'0.82rem',marginBottom:12}}>
+              {msg}
+            </div>
+          )}
+
+          <button onClick={submit} disabled={busy} style={{
+            width:'100%', background: busy ? C.border : C.green, color:'#fff', border:'none',
+            borderRadius:9, padding:'12px', fontSize:'0.92rem', fontWeight:600,
+            cursor: busy ? 'default' : 'pointer', marginTop:4, fontFamily:'inherit',
+            transition:'background 0.15s',
+          }}>
+            {busy ? 'Just a moment…' : mode === 'signup' ? 'Create My Account' : 'Sign In'}
+          </button>
+        </div>
+
+        {/* Mode badge */}
+        <div style={{
+          marginTop:16, textAlign:'center', fontSize:'0.72rem', color:C.textDim,
+          background:C.surface2, border:`1px solid ${C.border}`, borderRadius:8, padding:'10px 14px',
+        }}>
+          {CLOUD_MODE
+            ? '☁️  Cloud sync on — your travels save to your account on any device'
+            : '📱  Local mode — your travels save in this browser on this device'}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
 const CONTINENT_COLORS = {
   'Africa':'#c8601a','Asia':'#3a9a8a','Europe':'#8a60c0',
   'North America':'#c8a030','South America':'#5a9a40',
@@ -592,7 +854,7 @@ function GoogleMapsPanel(){
 }
 
 // ── MAIN APP ─────────────────────────────────────────────────────────────────
-function TravelLog(){
+function TravelLog({ user, onSignOut }){
   const [mainTab,setMainTab]=useState('been');
   const [beenSec,setBeenSec]=useState('us');
   const [usSub,setUsSub]=useState('states');
@@ -639,6 +901,54 @@ function TravelLog(){
   const [wantItems,setWantItems]=useState([]);
 
   const tog=setter=>name=>setter(s=>{const n=new Set(s);n.has(name)?n.delete(name):n.add(name);return n;});
+
+  // ── LOAD saved data on mount ────────────────────────────────────────────
+  const [loaded,setLoaded]=useState(false);
+  const [saveState,setSaveState]=useState('');
+  const setters={
+    states:setVstStates,parks:setVstParks,continents:setVstConts,wonders:setVstWonders,
+    natural:setVstNatural,oceans:setVstOceans,countries:setVstCountries,capitals:setVstCapitals,
+    wCities:setWCities,usCities:setUsCities,rests:setRests,bars:setBars,breweries:setBreweries,
+    wineries:setWineries,beers:setBeers,wines:setWines,stays:setStays,beaches:setBeaches,
+    lakes:setLakes,rivers:setRivers,islands:setIslands,hikes:setHikes,museums:setMuseums,
+    historic:setHistoric,zoos:setZoos,cparks:setCparks,roadtrips:setRoadtrips,
+    sports:setSports,amusement:setAmusement,festivals:setFestivals,wantItems:setWantItems,
+  };
+
+  useEffect(()=>{
+    let alive=true;
+    (async()=>{
+      const d=await Auth.loadData(user);
+      if(!alive)return;
+      SET_KEYS.forEach(k=>{ if(setters[k]&&Array.isArray(d[k])) setters[k](new Set(d[k])); });
+      LIST_KEYS.forEach(k=>{ if(setters[k]&&Array.isArray(d[k])) setters[k](d[k]); });
+      setLoaded(true);
+    })();
+    return()=>{alive=false;};
+  },[]);
+
+  // ── SAVE (debounced) whenever anything changes ──────────────────────────
+  const current={
+    states:[...vstStates],parks:[...vstParks],continents:[...vstConts],wonders:[...vstWonders],
+    natural:[...vstNatural],oceans:[...vstOceans],countries:[...vstCountries],capitals:[...vstCapitals],
+    wCities,usCities,rests,bars,breweries,wineries,beers,wines,stays,beaches,lakes,rivers,
+    islands,hikes,museums,historic,zoos,cparks,roadtrips,sports,amusement,festivals,wantItems,
+  };
+  const snapshot=JSON.stringify(current);
+  const firstSave=useRef(true);
+
+  useEffect(()=>{
+    if(!loaded)return;
+    if(firstSave.current){firstSave.current=false;return;}
+    setSaveState('saving');
+    const t=setTimeout(async()=>{
+      const ok=await Auth.saveData(user,JSON.parse(snapshot));
+      setSaveState(ok?'saved':'error');
+      setTimeout(()=>setSaveState(''),2000);
+    },700);
+    return()=>clearTimeout(t);
+  },[snapshot,loaded]);
+
   const totalPlaces=vstStates.size+vstParks.size+vstConts.size+vstWonders.size+vstCountries.size+vstCapitals.size+
     wCities.length+usCities.length+rests.length+bars.length+breweries.length+wineries.length+
     beers.length+wines.length+stays.length+beaches.length+lakes.length+rivers.length+
@@ -771,9 +1081,26 @@ function TravelLog(){
     <div style={{background:C.bg,minHeight:'100vh',color:C.text,fontFamily:'system-ui,sans-serif'}}>
       <header style={{background:'linear-gradient(135deg,#0f1f0f,#1c3018)',borderBottom:`1px solid ${C.border}`,padding:'16px 20px 14px'}}>
         <div style={{maxWidth:960,margin:'0 auto'}}>
-          <h1 style={{fontFamily:"'Playfair Display',serif",fontSize:'1.55rem',color:C.text,margin:0}}>
-            Quail's Travel Log <span style={{fontStyle:'italic',fontSize:'0.88rem',color:C.textMuted}}>· Guide to the Galaxy</span>
-          </h1>
+          <div style={{display:'flex',alignItems:'flex-start',justifyContent:'space-between',gap:12,flexWrap:'wrap'}}>
+            <h1 style={{fontFamily:"'Playfair Display',serif",fontSize:'1.55rem',color:C.text,margin:0}}>
+              Quail's Travel Log <span style={{fontStyle:'italic',fontSize:'0.88rem',color:C.textMuted}}>· Guide to the Galaxy</span>
+            </h1>
+            <div style={{display:'flex',alignItems:'center',gap:10}}>
+              {saveState && (
+                <span style={{fontSize:'0.72rem',color:saveState==='saved'?C.greenHi:saveState==='error'?'#e08070':C.textMuted,whiteSpace:'nowrap'}}>
+                  {saveState==='saving'?'Saving…':saveState==='saved'?'✓ Saved':'⚠ Save failed'}
+                </span>
+              )}
+              <span style={{fontSize:'0.78rem',color:C.textMuted,whiteSpace:'nowrap'}}>
+                {user.name}
+              </span>
+              <button onClick={onSignOut} style={{
+                background:'transparent',border:`1px solid ${C.border}`,color:C.textMuted,
+                borderRadius:7,padding:'4px 11px',fontSize:'0.75rem',cursor:'pointer',
+                fontFamily:'inherit',whiteSpace:'nowrap',
+              }}>Sign Out</button>
+            </div>
+          </div>
           <div style={{display:'flex',flexWrap:'wrap',gap:16,marginTop:10}}>
             {[{e:'🏛️',l:`${vstStates.size}/50 States`,c:C.rust},{e:'🏔️',l:`${vstParks.size}/63 Parks`,c:C.greenHi},{e:'🌍',l:`${vstCountries.size} Countries`,c:C.teal},{e:'📍',l:`${totalPlaces} Total`,c:C.gold}].map(s=>(
               <div key={s.l} style={{display:'flex',alignItems:'center',gap:5}}><span>{s.e}</span><span style={{fontSize:'0.78rem',color:s.c,fontWeight:600}}>{s.l}</span></div>
@@ -818,7 +1145,34 @@ function TravelLog(){
   );
 }
 
-ReactDOM.createRoot(document.getElementById('root')).render(<TravelLog/>);
+function App(){
+  const [user,setUser]=useState(null);
+  const [checking,setChecking]=useState(true);
+
+  useEffect(()=>{
+    let alive=true;
+    (async()=>{
+      const s=await Auth.getSession();
+      if(alive){ setUser(s); setChecking(false); }
+    })();
+    return()=>{alive=false;};
+  },[]);
+
+  const signOut=async()=>{ await Auth.signOut(); setUser(null); };
+
+  if(checking) return (
+    <div style={{minHeight:'100vh',background:C.bg,display:'flex',alignItems:'center',
+      justifyContent:'center',color:C.textMuted,fontSize:'0.9rem'}}>
+      Loading your travels…
+    </div>
+  );
+
+  if(!user) return <AuthScreen onAuth={setUser}/>;
+
+  return <TravelLog key={user.email} user={user} onSignOut={signOut}/>;
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
 </script>
 </body>
 </html>
